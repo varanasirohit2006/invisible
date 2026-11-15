@@ -1,0 +1,19 @@
+[project]
+name = "invisible-work-detector"
+version = "0.1.0"
+description = "A local-first, consent-based workflow discovery and automation assistant."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra -p no:cacheprovider"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+

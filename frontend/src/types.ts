@@ -122,6 +122,29 @@ export interface Preview {
   expires_at: string
 }
 
+export interface BatchItem {
+  workflow_id: number
+  workflow_title: string
+  source_file: string
+  new_name: string
+  destination_folder: string
+  reason: string
+  candidates: DestinationSuggestion['candidates']
+  preview_id: string | null
+  plan: FrozenPlan | null
+  expires_at: string | null
+  status: 'ready' | 'needs_destination' | 'error'
+}
+
+export interface BatchSimulation {
+  items: BatchItem[]
+}
+
+export interface BatchRunResult {
+  run_ids: string[]
+  count: number
+}
+
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'needs_review'
 export interface Run {
   id: string

@@ -17,6 +17,7 @@ from shared.paths import ScopeError
 from .config import Config
 from .contracts import (
     ApprovalRequest,
+    BatchRunRequest,
     ClearRequest,
     CompletionRequest,
     DestinationRequest,
@@ -266,6 +267,14 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.post("/api/execute", dependencies=[Depends(authenticated)])
     def execute(body: ExecuteRequest):
         return service.enqueue(body.workflow_id, body.approval_id)
+
+    @app.post("/api/batch/simulate", dependencies=[Depends(authenticated)])
+    def batch_simulate():
+        return service.batch_simulate()
+
+    @app.post("/api/batch/run", dependencies=[Depends(authenticated)])
+    def batch_run(body: BatchRunRequest):
+        return service.batch_run(body.items)
 
     @app.get("/api/runs", dependencies=[Depends(authenticated)])
     def runs(

@@ -38,6 +38,14 @@ class ExecuteRequest(WorkflowRequest):
     approval_id: str = Field(min_length=1, max_length=80)
 
 
+class BatchRunItem(WorkflowRequest):
+    preview_id: str = Field(min_length=1, max_length=80)
+
+
+class BatchRunRequest(StrictModel):
+    items: list[BatchRunItem] = Field(min_length=1, max_length=50)
+
+
 class HeartbeatRequest(StrictModel):
     instance_id: str = Field(min_length=8, max_length=80)
     watching: int = Field(default=0, ge=0, le=20)

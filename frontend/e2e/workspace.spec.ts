@@ -330,3 +330,89 @@ test('learned image destinations keep cars and buses separate and ask about uncl
   expect(existsSync(path.join(edited, path.basename(unknown)))).toBe(false)
   expect(errors).toEqual([])
 })
+
+test('master button files every recognized pending file in one approved batch', async ({
+  page,
+}) => {
+  const errors = monitorErrors(page)
+  await pair(page)
+  const root = path.join(directory, 'batch-work')
+  const downloads = path.join(root, 'downloads')
+  const trucks = path.join(root, 'photos', 'truck')
+  const vans = path.join(root, 'photos', 'van')
+  const reviewed = path.join(root, 'photos', 'reviewed')
+  for (const folder of [downloads, trucks, vans]) mkdirSync(folder, { recursive: true })
+  await navigate(page, 'Settings')
+  await page.getByRole('textbox', { name: 'Folder path' }).fill(root)
+  await page.getByRole('button', { name: 'Add folder', exact: true }).click()
+  await page.getByRole('checkbox', { name: /I approve file activity monitoring/ }).check()
+  await page.getByLabel('Minimum repeated sessions').selectOption('2')
+  const monitoring = page.getByRole('switch', { name: 'Activity monitoring' })
+  if ((await monitoring.getAttribute('aria-checked')) === 'false') await monitoring.click()
+  await page.getByRole('button', { name: 'Save settings' }).click()
+  await expect(page.getByText('Settings saved', { exact: true })).toBeVisible()
+  await expect
+    .poll(async () => (await (await page.request.get('/api/status')).json()).watching)
+    .toBe(3)
+  for (const [category, folder] of [
+    ['truck', trucks],
+    ['van', vans],
+  ]) {
+    const source = path.join(downloads, `${category}-lesson.jpg`)
+    writeFileSync(source, `Synthetic ${category} image fixture`)
+    await observed(page, 'file_created', `${category}-lesson`)
+    renameSync(source, path.join(folder, path.basename(source)))
+    await observed(page, 'file_moved', `${category}-lesson`)
+  }
+  await navigate(page, 'Workflows')
+  await page.getByRole('button', { name: 'Discover patterns' }).click()
+  await expect(page.locator('.workflow-row').filter({ hasText: 'Create JPG' })).toHaveCount(1)
+  const pending = [
+    { name: 'truck-next.jpg', folder: trucks, content: 'Batch truck contents' },
+    { name: 'van-next.jpg', folder: vans, content: 'Batch van contents' },
+    { name: 'SCAN_7777.jpg', folder: reviewed, content: 'Batch unclear contents' },
+  ]
+  for (const file of pending) {
+    writeFileSync(path.join(downloads, file.name), file.content)
+    await observed(page, 'file_created', file.name.replace('.jpg', ''))
+  }
+  await page.getByRole('button', { name: 'File everything' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('heading', { name: 'File everything at once' })).toBeVisible()
+  await expect(dialog.locator('.batch-summary')).toBeVisible()
+  const mine = new Set(pending.map((file) => file.name))
+  // Earlier tests may leave other pending files; keep only this batch's three.
+  for (const row of await dialog.locator('.batch-row').all()) {
+    const name = (await row.locator('.batch-name strong').innerText()).trim()
+    if (!mine.has(name)) {
+      const box = row.getByRole('checkbox')
+      if (await box.isChecked()) await box.uncheck()
+    }
+  }
+  const truckRow = dialog.locator('.batch-row').filter({ hasText: 'truck-next.jpg' })
+  await expect(truckRow.getByLabel('Destination folder', { exact: true })).toHaveValue(trucks)
+  const vanRow = dialog.locator('.batch-row').filter({ hasText: 'van-next.jpg' })
+  await expect(vanRow.getByLabel('Destination folder', { exact: true })).toHaveValue(vans)
+  const unclearRow = dialog.locator('.batch-row').filter({ hasText: 'SCAN_7777.jpg' })
+  await expect(unclearRow.locator('.status-badge')).toHaveText('Needs a folder')
+  const runAll = dialog.getByRole('button', { name: /Approve & run all/ })
+  await expect(runAll).toBeDisabled()
+  await page.screenshot({ path: path.join(directory, 'batch-review.png'), fullPage: false })
+  await unclearRow.getByLabel('Destination folder', { exact: true }).fill(reviewed)
+  await expect(runAll).toBeEnabled()
+  await runAll.click()
+  await expect(dialog.getByRole('heading', { name: 'Your batch is queued.' })).toBeVisible()
+  await expect(dialog.getByText('3 approved files', { exact: false })).toBeVisible()
+  await dialog.getByRole('button', { name: 'View run history' }).click()
+  for (const file of pending) {
+    const target = path.join(file.folder, file.name)
+    await expect.poll(() => existsSync(target)).toBe(true)
+    expect(existsSync(path.join(downloads, file.name))).toBe(false)
+    expect(readFileSync(target, 'utf8')).toBe(file.content)
+  }
+  const runs = await (await page.request.get('/api/runs?limit=3')).json()
+  expect(runs.items).toHaveLength(3)
+  expect(runs.items.every((run: { status: string }) => run.status === 'succeeded')).toBe(true)
+  await page.screenshot({ path: path.join(directory, 'batch-completed.png'), fullPage: false })
+  expect(errors).toEqual([])
+})

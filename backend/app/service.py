@@ -2,11 +2,12 @@ import json
 import os
 import threading
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 from agent.executor import build_plan, verify_inputs
-from shared.models import ActivityEvent, FrozenPlan, utc_now
-from shared.paths import Scope, approved_folder
+from shared.models import ActivityEvent, AutomationParams, FrozenPlan, utc_now
+from shared.paths import Scope, ScopeError, approved_folder
 
 from .config import Config
 from .contracts import CompletionRequest, HeartbeatRequest, SettingsUpdate
@@ -118,8 +119,6 @@ class Service:
                         "An event is older than the configured retention period.", 422
                     )
                 if event.event_type in {"file_moved", "file_renamed"}:
-                    from pathlib import Path
-
                     same_parent = Path(event.old_path).parent == Path(event.new_path).parent
                     if same_parent != (event.event_type == "file_renamed"):
                         raise ServiceError(
@@ -421,6 +420,130 @@ class Service:
                 (run_id, workflow_id, approval_id, row["plan"], utc_now()),
             )
         return {"id": run_id, "status": "queued"}
+
+    def batch_simulate(self) -> dict:
+        """Gather known pending files and preview where each one would go. Read-only."""
+        settings = self.db.settings()
+        if not settings["consent_at"]:
+            raise ServiceError("Approve folders in Settings before filing files.", 403)
+        scope = Scope(settings["approved_folders"])
+        by_extension: dict[str, dict] = {}
+        for workflow in self.workflows("real"):
+            if not workflow["can_automate"]:
+                continue
+            first = workflow["sequence"][0]
+            if first.startswith("file_created:"):
+                by_extension.setdefault("." + first.split(":", 1)[1], workflow)
+        if not by_extension:
+            return {"items": []}
+        cutoff = (datetime.now(UTC) - timedelta(days=settings["retention_days"])).isoformat()
+        with self.db.connection() as conn:
+            created = conn.execute(
+                "SELECT file_path FROM events WHERE is_demo=0 AND event_type='file_created' "
+                "AND timestamp>=? AND file_path IS NOT NULL ORDER BY timestamp DESC,id DESC LIMIT 2000",
+                (cutoff,),
+            ).fetchall()
+        items = []
+        seen: set[str] = set()
+        for row in created:
+            if len(items) >= 50:
+                break
+            workflow = by_extension.get(Path(row["file_path"]).suffix.casefold())
+            if workflow is None:
+                continue
+            try:
+                source = scope.check(row["file_path"], exists=True)
+            except (ScopeError, OSError):
+                continue
+            key = str(source)
+            if key in seen or not source.is_file():
+                continue
+            seen.add(key)
+            suggestion = self.destination(workflow["id"], key)
+            item = {
+                "workflow_id": workflow["id"],
+                "workflow_title": workflow["title"],
+                "source_file": key,
+                "new_name": source.name,
+                "destination_folder": suggestion["destination_folder"] or "",
+                "reason": suggestion["reason"],
+                "candidates": suggestion["candidates"],
+                "preview_id": None,
+                "plan": None,
+                "expires_at": None,
+                "status": "needs_destination",
+            }
+            if suggestion["destination_folder"]:
+                try:
+                    preview = self.preview(
+                        workflow["id"],
+                        AutomationParams(
+                            source_file=key,
+                            new_name=source.name,
+                            destination_folder=suggestion["destination_folder"],
+                        ),
+                    )
+                except (ScopeError, ValueError, OSError) as error:
+                    item["reason"] = str(error)
+                    item["status"] = "error"
+                else:
+                    item.update(
+                        preview_id=preview["id"],
+                        plan=preview["plan"],
+                        expires_at=preview["expires_at"],
+                        status="ready",
+                    )
+            items.append(item)
+        return {"items": items}
+
+    def batch_run(self, items: list) -> dict:
+        """Approve and queue every reviewed preview as one batch the agent drains in order."""
+        self.recover_stale_runs()
+        if not self.agent_status()["connected"]:
+            raise ServiceError("Start the local agent before running this automation.")
+        unique: dict[str, int] = {}
+        for item in items:
+            unique[item.preview_id] = item.workflow_id
+        run_ids = []
+        with self.db.connection(write=True) as conn:
+            if conn.execute(
+                "SELECT 1 FROM runs WHERE status IN ('queued','running') LIMIT 1"
+            ).fetchone():
+                raise ServiceError("Another automation is in progress. Wait for it to finish.")
+            settings = json.loads(
+                conn.execute("SELECT value FROM settings WHERE id=1").fetchone()[0]
+            )
+            scope = Scope(settings["approved_folders"])
+            for preview_id, workflow_id in unique.items():
+                row = conn.execute(
+                    "SELECT a.id AS approval_id,a.consumed,p.workflow_id,p.plan,p.expires_at "
+                    "FROM previews p LEFT JOIN approvals a ON a.preview_id=p.id WHERE p.id=?",
+                    (preview_id,),
+                ).fetchone()
+                if row is None or row["workflow_id"] != workflow_id:
+                    raise ServiceError("A preview in this batch is no longer available.")
+                if row["expires_at"] <= utc_now():
+                    raise ServiceError("A preview in this batch expired. Simulate again.")
+                plan = FrozenPlan.model_validate_json(row["plan"])
+                if plan.scope_revision != settings["scope_revision"]:
+                    raise ServiceError("Folder permissions changed. Simulate again.")
+                verify_inputs(plan, scope)
+                if row["approval_id"] and row["consumed"]:
+                    raise ServiceError("A preview in this batch was already run. Simulate again.")
+                approval_id = row["approval_id"] or uuid4().hex
+                if not row["approval_id"]:
+                    conn.execute(
+                        "INSERT INTO approvals(id,preview_id,workflow_id,created_at) VALUES(?,?,?,?)",
+                        (approval_id, preview_id, workflow_id, utc_now()),
+                    )
+                run_id = uuid4().hex
+                conn.execute("UPDATE approvals SET consumed=1 WHERE id=?", (approval_id,))
+                conn.execute(
+                    "INSERT INTO runs(id,workflow_id,approval_id,plan,status,created_at) VALUES(?,?,?,?,'queued',?)",
+                    (run_id, workflow_id, approval_id, row["plan"], utc_now()),
+                )
+                run_ids.append(run_id)
+        return {"run_ids": run_ids, "count": len(run_ids)}
 
     def agent_status(self) -> dict:
         with self.db.connection() as conn:

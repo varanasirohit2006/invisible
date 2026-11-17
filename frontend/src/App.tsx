@@ -148,7 +148,13 @@ function Workspace() {
         ) : null}
         {page === 'activity' ? <ActivityPage source={source} key={source} /> : null}
         {page === 'workflows' ? (
-          <WorkflowsPage source={source} key={source} onReview={setSelected} navigate={navigate} />
+          <WorkflowsPage
+            source={source}
+            key={source}
+            onReview={setSelected}
+            navigate={navigate}
+            agentConnected={Boolean(data?.agent.connected)}
+          />
         ) : null}
         {page === 'runs' ? <RunsPage /> : null}
         {page === 'settings' ? <SettingsPage /> : null}

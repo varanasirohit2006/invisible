@@ -1,24 +1,28 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, ScanLine, Search, Sparkles } from 'lucide-react'
+import { ArrowRight, Layers, ScanLine, Search, Sparkles } from 'lucide-react'
 import { api, post } from '../api'
 import type { Page, Source, Workflow } from '../types'
 import { number } from '../format'
 import { Button, EmptyState, ErrorNotice, Loading, PageHeading } from '../components/ui'
 import { WorkflowHint, WorkflowRow } from '../components/WorkflowRow'
+import { BatchReview } from '../components/BatchReview'
 
 export function WorkflowsPage({
   source,
   onReview,
   navigate,
+  agentConnected,
 }: {
   source: Source
   onReview: (workflow: Workflow) => void
   navigate: (page: Page) => void
+  agentConnected: boolean
 }) {
   const client = useQueryClient()
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState('impact')
+  const [showBatch, setShowBatch] = useState(false)
   const workflows = useQuery({
     queryKey: ['workflows', source],
     queryFn: ({ signal }) => api<{ items: Workflow[] }>(`/workflows?source=${source}`, { signal }),
@@ -46,10 +50,18 @@ export function WorkflowsPage({
         title="Find your next small win."
         description="Recurring file routines, ready for a closer look."
         action={
-          <Button busy={analyze.isPending} onClick={() => analyze.mutate()}>
-            <ScanLine size={17} />
-            Discover patterns
-          </Button>
+          <div className="heading-actions">
+            {source === 'real' ? (
+              <Button variant="secondary" onClick={() => setShowBatch(true)}>
+                <Layers size={17} />
+                File everything
+              </Button>
+            ) : null}
+            <Button busy={analyze.isPending} onClick={() => analyze.mutate()}>
+              <ScanLine size={17} />
+              Discover patterns
+            </Button>
+          </div>
         }
       />
       <ErrorNotice error={analyze.error || workflows.error} />
@@ -132,6 +144,13 @@ export function WorkflowsPage({
           <p>Nothing changes until you approve and explicitly run the automation.</p>
         </div>
       </div>
+      {showBatch ? (
+        <BatchReview
+          onClose={() => setShowBatch(false)}
+          navigate={navigate}
+          agentConnected={agentConnected}
+        />
+      ) : null}
     </>
   )
 }
